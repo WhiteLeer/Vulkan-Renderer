@@ -4,6 +4,9 @@
 // GLFW库
 #include <GLFW/glfw3.h>
 
+// GLM库
+#include <glm/glm.hpp>
+
 // C++库
 #include <iostream>
 #include <fstream>
@@ -11,8 +14,10 @@
 #include <optional>
 #include <vector>
 #include <set>
+#include <array>
 
 using namespace std;
+using namespace glm;
 
 // 是否开启验证层
 #define DEBUG 
@@ -55,6 +60,48 @@ struct SwapChainSupportDetails
     vector<VkPresentModeKHR> presentModes{}; // 可用演示模式
 };
 
+// 顶点信息
+struct Vertex
+{
+    vec2 pos;
+    vec3 color;
+
+    // 顶点绑定描述
+    static VkVertexInputBindingDescription getBindingDescription()
+    {
+        VkVertexInputBindingDescription bindingDescription{};
+        bindingDescription.binding = 0;
+        bindingDescription.stride = sizeof(Vertex);
+        bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
+        return bindingDescription;
+    }
+
+    // 顶点属性描述
+    static array<VkVertexInputAttributeDescription, 2> getAttributeDescriptions()
+    {
+        array<VkVertexInputAttributeDescription, 2> attributeDescriptions{};
+
+        attributeDescriptions[0].binding = 0;
+        attributeDescriptions[0].location = 0;
+        attributeDescriptions[0].format = VK_FORMAT_R32G32_SFLOAT;
+        attributeDescriptions[0].offset = offsetof(Vertex, pos);
+
+        attributeDescriptions[1].binding = 0;
+        attributeDescriptions[1].location = 1;
+        attributeDescriptions[1].format = VK_FORMAT_R32G32B32_SFLOAT;
+        attributeDescriptions[1].offset = offsetof(Vertex, color);
+
+        return attributeDescriptions;
+    }
+};
+
+const vector<Vertex> vertices = {
+    {{0.0f, -0.5f}, {1.0f, 0.0f, 0.0f}},
+    {{0.5f, 0.5f}, {0.0f, 1.0f, 0.0f}},
+    {{-0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}}
+};
+
 class HelloTriangleApplication
 {
 public:
@@ -67,8 +114,19 @@ public:
     }
 
 private:
-    const uint32_t width = 800;
-    const uint32_t height = 600;
+    const uint32_t const_width = 800;
+    const uint32_t const_height = 600;
+    const uint32_t const_maxFrames = 3;
+
+    const std::vector<Vertex> vertices =
+    {
+        {{0.0f, -0.5f}, {1.0f, 0.0f, 0.0f}},
+        {{0.5f, 0.5f}, {0.0f, 1.0f, 0.0f}},
+        {{-0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}}
+    };
+
+    uint32_t currentFrame = 0;
+    bool framebufferResized = false;
 
     GLFWwindow* myWindow = nullptr;
     VkInstance myVulkanInstance = nullptr;
@@ -96,11 +154,11 @@ private:
     vector<VkFramebuffer> mySwapChainFramebuffers{};
 
     VkCommandPool myCommandPool = nullptr;
-    VkCommandBuffer myCommandBuffer = nullptr;
+    vector<VkCommandBuffer> myCommandBuffers{};
 
-    VkSemaphore myImageAvailableSemaphore = nullptr;
-    VkSemaphore myRenderFinishedSemaphore = nullptr;
-    VkFence myInFlightFence = nullptr;
+    vector<VkSemaphore> myImageAvailableSemaphores{};
+    vector<VkSemaphore> myRenderFinishedSemaphores{};
+    vector<VkFence> myInFlightFences{};
 
     /// <summary>
     /// 一级函数
@@ -112,10 +170,15 @@ private:
 
         // 设置窗口
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API); // 不使用图形API
-        glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE); // 禁止调整窗口大小
 
         // 创建窗口
-        myWindow = glfwCreateWindow(width, height, "Vulkan", nullptr, nullptr);
+        myWindow = glfwCreateWindow(const_width, const_height, "Vulkan", nullptr, nullptr);
+
+        // 关联窗口
+        glfwSetWindowUserPointer(myWindow, this);
+
+        // 设置回调
+        glfwSetFramebufferSizeCallback(myWindow, framebufferResizeCallback);
     }
 
     void initVulkan()
@@ -176,19 +239,8 @@ private:
 
     void cleanup()
     {
-        // 销毁
-        vkDestroySemaphore(myDevice, myRenderFinishedSemaphore, nullptr);
-        vkDestroySemaphore(myDevice, myImageAvailableSemaphore, nullptr);
-        vkDestroyFence(myDevice, myInFlightFence, nullptr);
-
-        // 销毁 命令池
-        vkDestroyCommandPool(myDevice, myCommandPool, nullptr);
-
-        // 销毁 帧缓冲区
-        for (auto framebuffer : mySwapChainFramebuffers)
-        {
-            vkDestroyFramebuffer(myDevice, framebuffer, nullptr);
-        }
+        // 销毁 交换链相关
+        cleanupSwapChain();
 
         // 销毁 渲染管线
         vkDestroyPipeline(myDevice, myGraphicsPipeline, nullptr);
@@ -199,14 +251,16 @@ private:
         // 销毁 渲染通道
         vkDestroyRenderPass(myDevice, myRenderPass, nullptr);
 
-        // 销毁 图像视图
-        for (auto imageView : mySwapChainImageViews)
+        // 销毁 信号量、栅栏
+        for (int num = 0; num < const_maxFrames; num++)
         {
-            vkDestroyImageView(myDevice, imageView, nullptr);
+            vkDestroySemaphore(myDevice, myRenderFinishedSemaphores[num], nullptr);
+            vkDestroySemaphore(myDevice, myImageAvailableSemaphores[num], nullptr);
+            vkDestroyFence(myDevice, myInFlightFences[num], nullptr);
         }
 
-        // 销毁 交换链条
-        vkDestroySwapchainKHR(myDevice, mySwapChain, nullptr);
+        // 销毁 命令池
+        vkDestroyCommandPool(myDevice, myCommandPool, nullptr);
 
         // 销毁 逻辑设备引用
         vkDestroyDevice(myDevice, nullptr);
@@ -230,6 +284,12 @@ private:
     /// <summary>
     /// 二级函数
     /// </summary>
+    static void framebufferResizeCallback(GLFWwindow* window, int width, int height)
+    {
+        auto app = reinterpret_cast<HelloTriangleApplication*>(glfwGetWindowUserPointer(window));
+        app->framebufferResized = true;
+    }
+
     void createVulkanInstance()
     {
         // 判断验证层是否可用
@@ -544,8 +604,14 @@ private:
         // 设置 顶点输入
         VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
         vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-        vertexInputInfo.vertexBindingDescriptionCount = 0;
-        vertexInputInfo.vertexAttributeDescriptionCount = 0;
+
+        auto bindingDescription = Vertex::getBindingDescription();
+        auto attributeDescriptions = Vertex::getAttributeDescriptions();
+
+        vertexInputInfo.vertexBindingDescriptionCount = 1;
+        vertexInputInfo.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributeDescriptions.size());
+        vertexInputInfo.pVertexBindingDescriptions = &bindingDescription;
+        vertexInputInfo.pVertexAttributeDescriptions = attributeDescriptions.data();
 
         // 设置 图元输入
         VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
@@ -688,14 +754,16 @@ private:
 
     void createCommandBuffer()
     {
+        myCommandBuffers.resize(const_maxFrames);
+
         // 为命令池分配一个命令缓冲区
         VkCommandBufferAllocateInfo allocInfo{};
         allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
         allocInfo.commandPool = myCommandPool;
         allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        allocInfo.commandBufferCount = 1;
+        allocInfo.commandBufferCount = (uint32_t)myCommandBuffers.size();
 
-        if (vkAllocateCommandBuffers(myDevice, &allocInfo, &myCommandBuffer) != VK_SUCCESS)
+        if (vkAllocateCommandBuffers(myDevice, &allocInfo, myCommandBuffers.data()) != VK_SUCCESS)
         {
             throw runtime_error("failed to allocate command buffers!");
         }
@@ -761,6 +829,10 @@ private:
 
     void createSyncObjects()
     {
+        myImageAvailableSemaphores.resize(const_maxFrames);
+        myRenderFinishedSemaphores.resize(const_maxFrames);
+        myInFlightFences.resize(const_maxFrames);
+
         // 用于检测三个信号量
         VkSemaphoreCreateInfo semaphoreInfo{};
         semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
@@ -769,48 +841,59 @@ private:
         fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
         fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
 
-        if (vkCreateSemaphore(myDevice, &semaphoreInfo, nullptr, &myImageAvailableSemaphore) != VK_SUCCESS ||
-            vkCreateSemaphore(myDevice, &semaphoreInfo, nullptr, &myRenderFinishedSemaphore) != VK_SUCCESS ||
-            vkCreateFence(myDevice, &fenceInfo, nullptr, &myInFlightFence) != VK_SUCCESS)
+        for (int num = 0; num < const_maxFrames; num++)
         {
-            throw runtime_error("failed to create synchronization objects for a frame!");
+            if (vkCreateSemaphore(myDevice, &semaphoreInfo, nullptr, &myImageAvailableSemaphores[num]) != VK_SUCCESS ||
+                vkCreateSemaphore(myDevice, &semaphoreInfo, nullptr, &myRenderFinishedSemaphores[num]) != VK_SUCCESS ||
+                vkCreateFence(myDevice, &fenceInfo, nullptr, &myInFlightFences[num]) != VK_SUCCESS)
+            {
+                throw runtime_error("failed to create synchronization objects for a frame!");
+            }
         }
     }
 
     void drawFrame()
     {
         // 等待上一帧完成
-        vkWaitForFences(myDevice, 1, &myInFlightFence, VK_TRUE, UINT64_MAX);
-
-        // 重置限制栅栏信号
-        vkResetFences(myDevice, 1, &myInFlightFence);
+        vkWaitForFences(myDevice, 1, &myInFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
 
         // 从交换链请求下一张图像
         uint32_t imageIndex;
-        vkAcquireNextImageKHR(myDevice, mySwapChain, UINT64_MAX, myImageAvailableSemaphore, VK_NULL_HANDLE, &imageIndex);
+        VkResult result = vkAcquireNextImageKHR(myDevice, mySwapChain, UINT64_MAX, myImageAvailableSemaphores[currentFrame], VK_NULL_HANDLE, &imageIndex);
+
+        // 当窗口变化时，重新创建交换链
+        if (result == VK_ERROR_OUT_OF_DATE_KHR)
+        {
+            recreateSwapChain();
+            return;
+        }
+        else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) throw runtime_error("failed to acquire swap chain image!");
+
+        // 重置限制栅栏信号
+        vkResetFences(myDevice, 1, &myInFlightFences[currentFrame]);
 
         // 重置并记录命令缓冲区
-        vkResetCommandBuffer(myCommandBuffer, /*VkCommandBufferResetFlagBits*/ 0);
-        recordCommandBuffer(myCommandBuffer, imageIndex);
+        vkResetCommandBuffer(myCommandBuffers[currentFrame], /*VkCommandBufferResetFlagBits*/ 0);
+        recordCommandBuffer(myCommandBuffers[currentFrame], imageIndex);
 
         // 提交命令缓冲区
         VkSubmitInfo submitInfo{};
         submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
 
-        VkSemaphore waitSemaphores[] = { myImageAvailableSemaphore };
+        VkSemaphore waitSemaphores[] = { myImageAvailableSemaphores[currentFrame] };
         VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
         submitInfo.waitSemaphoreCount = 1;
         submitInfo.pWaitSemaphores = waitSemaphores;
         submitInfo.pWaitDstStageMask = waitStages;
 
         submitInfo.commandBufferCount = 1;
-        submitInfo.pCommandBuffers = &myCommandBuffer;
+        submitInfo.pCommandBuffers = &myCommandBuffers[currentFrame];
 
-        VkSemaphore signalSemaphores[] = { myRenderFinishedSemaphore };
+        VkSemaphore signalSemaphores[] = { myRenderFinishedSemaphores[currentFrame] };
         submitInfo.signalSemaphoreCount = 1;
         submitInfo.pSignalSemaphores = signalSemaphores;
 
-        if (vkQueueSubmit(myGraphicsQueue, 1, &submitInfo, myInFlightFence) != VK_SUCCESS)
+        if (vkQueueSubmit(myGraphicsQueue, 1, &submitInfo, myInFlightFences[currentFrame]) != VK_SUCCESS)
         {
             throw runtime_error("failed to submit draw command buffer!");
         }
@@ -828,7 +911,18 @@ private:
 
         presentInfo.pImageIndices = &imageIndex;
 
-        vkQueuePresentKHR(myPresentQueue, &presentInfo);
+        result = vkQueuePresentKHR(myPresentQueue, &presentInfo);
+
+        // 当窗口变化时，重新创建交换链
+        // if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR || framebufferResized) 
+        // {
+        //     framebufferResized = false;
+        //     recreateSwapChain();
+        // }
+        // else if (result != VK_SUCCESS) throw runtime_error("failed to present swap chain image!");
+
+        // 渲染下一帧
+        currentFrame = (currentFrame + 1) % const_maxFrames;
     }
 
     void DestroyDebugUtilsMessengerEXT(VkInstance instance, VkDebugUtilsMessengerEXT debugMessenger, const VkAllocationCallbacks* pAllocator)
@@ -841,6 +935,46 @@ private:
     /// <summary>
     /// 三级函数
     /// </summary>
+    void cleanupSwapChain()
+    {
+        // 销毁 帧缓冲区
+        for (auto framebuffer : mySwapChainFramebuffers)
+        {
+            vkDestroyFramebuffer(myDevice, framebuffer, nullptr);
+        }
+
+        // 销毁 图像视图
+        for (auto imageView : mySwapChainImageViews)
+        {
+            vkDestroyImageView(myDevice, imageView, nullptr);
+        }
+
+        // 销毁 交换链条
+        vkDestroySwapchainKHR(myDevice, mySwapChain, nullptr);
+    }
+
+    void recreateSwapChain()
+    {
+        int width = 0, height = 0;
+        glfwGetFramebufferSize(myWindow, &width, &height);
+
+        // 窗口最小化时暂停
+        while (width == 0 || height == 0)
+        {
+            glfwGetFramebufferSize(myWindow, &width, &height);
+            glfwWaitEvents();
+        }
+
+        vkDeviceWaitIdle(myDevice);
+
+        // 根据新窗口的数据重新创建交换链
+        cleanupSwapChain();
+
+        createSwapChain();
+        createImageViews();
+        createFramebuffers();
+    }
+
     bool checkValidationLayerSupport()
     {
         // 获取验证层信息
@@ -963,8 +1097,8 @@ private:
                 static_cast<uint32_t>(height)
             };
 
-            actualExtent.width = clamp(actualExtent.width, capabilities.minImageExtent.width, capabilities.maxImageExtent.width);
-            actualExtent.height = clamp(actualExtent.height, capabilities.minImageExtent.height, capabilities.maxImageExtent.height);
+            actualExtent.width = std::clamp(actualExtent.width, capabilities.minImageExtent.width, capabilities.maxImageExtent.width);
+            actualExtent.height = std::clamp(actualExtent.height, capabilities.minImageExtent.height, capabilities.maxImageExtent.height);
 
             return actualExtent;
         }
